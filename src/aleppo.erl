@@ -5,7 +5,7 @@
 -record(ale_context, {
         include_trail = [],
         include_dirs = [],
-		expand_file = fun expand_filename/2,
+        expand_file = fun expand_filename/2,
         macro_dict = dict:new()
     }).
 
@@ -54,7 +54,7 @@ process_tree(ParseTree, Options) ->
     Context = #ale_context{
         include_trail = IncludeTrail,
         include_dirs = IncludeDirs ++ proplists:get_value(include, Options, []),
-		expand_file = proplists:get_value(expand_file, Options, fun expand_filename/2),
+        expand_file = proplists:get_value(expand_file, Options, fun expand_filename/2),
         macro_dict = Dict2 },
 
     case catch process_tree(ParseTree, TokenAcc, Context) of
