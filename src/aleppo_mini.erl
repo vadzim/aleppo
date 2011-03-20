@@ -1,6 +1,6 @@
 % the goal is to expand simple defines in aleppo_parser.erl to be able to compile it
 
--module(simple_define).
+-module(aleppo_mini).
 
 -export([
 	process/1
