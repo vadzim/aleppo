@@ -1,10 +1,11 @@
-% Aleppo: ALternative Erlang Pre-ProcessOr 
+% Aleppo: ALternative Erlang Pre-ProcessOr
 -module(aleppo).
--export([process_file/1, process_tokens/1, process_tokens/2, scan_file/1]).
+-export([process_file/1, process_tokens/1, process_tokens/2, scan_file/1, scan_tokens/1]).
 
 -record(ale_context, {
         include_trail = [],
         include_dirs = [],
+		expand_file = fun expand_filename/2,
         macro_dict = dict:new()
     }).
 
@@ -36,28 +37,31 @@ process_tree(ParseTree, Options) ->
     {Dict0, IncludeTrail, IncludeDirs, TokenAcc} = case proplists:get_value(file, Options) of
         undefined -> {dict:new(), [], ["."], []};
         FileName -> {dict:store('FILE', [{string, 1, FileName}], dict:new()),
-                [filename:absname(FileName)], 
+                [filename:absname(FileName)],
                 [".", filename:dirname(FileName)],
                 lists:reverse(file_attribute_tokens(FileName, 1))}
     end,
 
     Dict1 = case proplists:get_value(module, Options) of
         undefined -> Dict0;
-        Module -> 
-            dict:store('MODULE', [{atom, 1, Module}], 
+        Module ->
+            dict:store('MODULE', [{atom, 1, Module}],
                 dict:store('MODULE_NAME', [{string, 1, atom_to_list(Module)}], Dict0))
     end,
 
     Dict2 = dict:store('MACHINE',  [{atom, 1, list_to_atom(erlang:system_info(machine))}], Dict1),
 
-    Context = #ale_context{ 
-        include_trail = IncludeTrail, 
-        include_dirs = IncludeDirs ++ proplists:get_value(include, Options, []), 
+    Context = #ale_context{
+        include_trail = IncludeTrail,
+        include_dirs = IncludeDirs ++ proplists:get_value(include, Options, []),
+		expand_file = proplists:get_value(expand_file, Options, fun expand_filename/2),
         macro_dict = Dict2 },
 
     case catch process_tree(ParseTree, TokenAcc, Context) of
         {error, What} ->
             {error, What};
+        {_MacroDict, [{eof, _} | RevTokens]} ->
+            {ok, lists:reverse(RevTokens)};
         {_MacroDict, RevTokens} ->
             {ok, lists:reverse(RevTokens)}
     end.
@@ -79,7 +83,7 @@ process_tree([Node|Rest], TokenAcc, Context) ->
             NewDict = dict:erase(MacroName, Context#ale_context.macro_dict),
             process_tree(Rest, TokenAcc, Context#ale_context{ macro_dict = NewDict });
         {'macro_include', {string, Loc, FileName}} ->
-            AbsName = expand_filename(FileName, Context),
+            AbsName = (Context#ale_context.expand_file)(FileName, Context#ale_context.include_dirs),
             {NewDict, IncludeTokens} = process_inclusion(AbsName, Loc, Context),
             process_tree(Rest, IncludeTokens ++ TokenAcc, Context#ale_context{ macro_dict = NewDict });
         {'macro_include_lib', {string, Loc, FileName}} ->
@@ -119,14 +123,14 @@ process_ifelse(Rest, MacroName, IfBody, ElseBody, TokenAcc, Context) ->
     {NewDict, NewTokens} = process_tree(ChooseBody, [], Context),
     process_tree(Rest, NewTokens ++ TokenAcc, Context#ale_context{ macro_dict = NewDict }).
 
-process_inclusion(FileName, {Line, _}, Context) ->
-    process_inclusion(FileName, Line, Context);
-process_inclusion(FileName, Line, Context) ->
+process_inclusion(File, {Line, _}, Context) ->
+    process_inclusion(File, Line, Context);
+process_inclusion({FileName, FileContent}, Line, Context) ->
     case lists:member(FileName, Context#ale_context.include_trail) of
         true ->
             throw({error, {circular_inclusion, FileName}});
         false ->
-            {ok, Tokens} = scan_file(FileName),
+            {ok, Tokens} = scan_tokens(FileContent),
             {NewTokens, _} = mark_keywords(Tokens),
             case aleppo_parser:parse(NewTokens) of
                 {ok, ParseTree} ->
@@ -138,13 +142,13 @@ process_inclusion(FileName, Line, Context) ->
                     end,
                     Dict1 = dict:store('FILE', [{string, 1, FileName}], Context#ale_context.macro_dict),
                     TokenAcc = lists:reverse(file_attribute_tokens(FileName, 1)),
-                    {Dict2, IncludedTokens} = process_tree(ParseTreeNoEOF, TokenAcc, 
-                        Context#ale_context{ 
-                            macro_dict = Dict1, 
+                    {Dict2, IncludedTokens} = process_tree(ParseTreeNoEOF, TokenAcc,
+                        Context#ale_context{
+                            macro_dict = Dict1,
                             include_trail = [FileName|Context#ale_context.include_trail]}),
                     case ThisFile of
                         undefined -> {Dict2, IncludedTokens};
-                        [{string, _Loc, ThisFileName}] -> 
+                        [{string, _Loc, ThisFileName}] ->
                             {dict:store('FILE', ThisFile, Dict2),
                                 lists:reverse(file_attribute_tokens(ThisFileName, Line)) ++ IncludedTokens}
                     end;
@@ -159,25 +163,25 @@ file_attribute_tokens(FileName, Line) ->
 
 expand_include_lib(FileName) ->
     [Lib | Rest] = filename:split(FileName),
-    filename:join([code:lib_dir(list_to_atom(Lib))|Rest]).
+    read_file(filename:join([code:lib_dir(list_to_atom(Lib))|Rest])).
 
 expand_filename([$/|_] = FileName, _) ->
     case filelib:is_file(FileName) of
-        true -> FileName;
+        true -> read_file(FileName);
         false -> throw({error, {not_found, FileName}})
     end;
-expand_filename([$$|FileNameMinusDollar] = FileName, Context) ->
+expand_filename([$$|FileNameMinusDollar] = FileName, IncludeDirs) ->
     [Var | Rest] = filename:split(FileNameMinusDollar),
     case os:getenv(Var) of
         false ->
-            expand_relative_filename(FileName, Context);
+            expand_relative_filename(FileName, IncludeDirs);
         Value ->
-            expand_filename(filename:join([Value|Rest]), Context)
+            expand_filename(filename:join([Value|Rest]), IncludeDirs)
     end;
-expand_filename(FileName, Context) ->
-    expand_relative_filename(FileName, Context).
+expand_filename(FileName, IncludeDirs) ->
+    expand_relative_filename(FileName, IncludeDirs).
 
-expand_relative_filename(FileName, Context) ->
+expand_relative_filename(FileName, IncludeDirs) ->
     ExpandedFileName = lists:foldl(
         fun
             (Dir, "") ->
@@ -188,16 +192,19 @@ expand_relative_filename(FileName, Context) ->
                 end;
             (_, F) ->
                 F
-        end, "", Context#ale_context.include_dirs),
+        end, "", IncludeDirs),
     case ExpandedFileName of
         "" -> throw({error, {not_found, FileName}});
         ExpandedFileName ->
-            filename:absname(ExpandedFileName)
+            read_file(filename:absname(ExpandedFileName))
     end.
 
-scan_file(FileName) ->
+read_file(FileName) ->
     {ok, FileContents} = file:read_file(FileName),
-    Data = binary_to_list(FileContents),
+    {FileName, binary_to_list(FileContents)}.
+
+scan_file(FileName) ->
+    {_, Data} = read_file(FileName),
     scan_tokens(Data).
 
 scan_tokens(Data) ->
