@@ -16,6 +16,8 @@ Features
 
 * Preprocessor directives can be used inside functions
 
+* Virtual file system support via custom read_file function for included files
+
 
 API
 ---
@@ -26,4 +28,4 @@ API
 
     aleppo:process_tokens(Tokens, Options) -> {ok, NewTokens} | {error, Error}
 
-        Options = [{file, FileName}]
+        Options = [{file, FileName}, {expand_file, fun(FileName, IncludeDirs) -> {AbsFileName, FileData}}]
